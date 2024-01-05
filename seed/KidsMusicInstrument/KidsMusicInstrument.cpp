@@ -2,7 +2,7 @@
 This code is a modification of OscPocketD/VASynth, created by Staffan Melin, staffan.melin@oscillator.se.
 It was later modified by (Steven @moonfriendsynth) to work with the Daisy Pod.
 I (Christopher @Nettech15) have modified it further to run on the Daisy Seed without the use of the Daisy Pod board.
-Synth parameters are now controlled by a Miditech i2-61 midi keyboard.
+I (Tony Liechty) have modified it further to be a stand alone instrument using GPIOs and analog inputs to sensors.
 Feel free to copy, modify, and improve this code to match your equipment and sound requirements.
 */
 
@@ -16,7 +16,7 @@ using namespace daisy;
 using namespace daisysp;
 
 // globals
-DaisySeed hw;
+DaisySeed hardware;
 MidiUsbHandler midi;
 float sysSampleRate;
 float sysCallbackRate;
@@ -86,14 +86,14 @@ void HandleKeyPresses(int key_index, bool new_state)
         {
 			if(seqmode == 1) SequencerRecord(note, velocity);
 			vasynth.NoteOn(note, velocity);
-			hw.SetLed(true);
+			hardware.SetLed(true);
 	        break;
         }
         case NoteOff:
         {
 			if(seqmode == 1) SequencerRecord(note, 0);
 			vasynth.NoteOff(note);
-			hw.SetLed(false);
+			hardware.SetLed(false);
 	        break;
         } 
 		/*
@@ -576,11 +576,11 @@ void Callback(void* data)
 
 int main(void)
 {
-	// init hw
-	hw.Init(true); // true = boost to 480MHz
+	// init hardware
+	hardware.Init(true); // true = boost to 480MHz
 
-	sysSampleRate = hw.AudioSampleRate();
-	sysCallbackRate = hw.AudioCallbackRate();
+	sysSampleRate = hardware.AudioSampleRate();
+	sysCallbackRate = hardware.AudioCallbackRate();
 
 	// init qspi flash for saving and loading patches
 	QSPIHandle::Config qspi_config;
@@ -592,7 +592,7 @@ int main(void)
 	qspi_config.pin_config.io3 = {DSY_GPIOF, 6};
 	qspi_config.pin_config.clk = {DSY_GPIOF, 10};
 	qspi_config.pin_config.ncs = {DSY_GPIOG, 6};
-	hw.qspi.Init(qspi_config);
+	hardware.qspi.Init(qspi_config);
 
 	// setup vasynth initial values
 	vasynth.Init();
@@ -604,7 +604,7 @@ int main(void)
 	System::Delay(100);
 	
 	// Start calling the audio callback
-	hw.StartAudio(AudioCallback);
+	hardware.StartAudio(AudioCallback);
 
 	/* Create Timer Handle and Config for Playback of audio in QSPI*/
     TimerHandle         tim5;
@@ -630,7 +630,7 @@ int main(void)
 	
 	for (int i = 0; i < NUM_KEYS; i++) {
 		//PULL UP enabled by default
-		keys[i].Init(hw.GetPin(i + GPIO_KEY_BASE));
+		keys[i].Init(hardware.GetPin(i + GPIO_KEY_BASE));
 	}
 
 	// Loop forever
@@ -642,7 +642,5 @@ int main(void)
 			if (keys[i].RisingEdge())  HandleKeyPresses(i, true);
 			
 		}
-        
-        	
 	}
 }
