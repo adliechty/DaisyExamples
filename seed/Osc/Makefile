@@ -7,6 +7,7 @@ CPP_SOURCES = Osc.cpp
 # Library Locations
 LIBDAISY_DIR = ../../libDaisy
 DAISYSP_DIR = ../../DaisySP
+LDFLAGS += -u _printf_float
 
 # Core location, and generic makefile.
 SYSTEM_FILES_DIR = $(LIBDAISY_DIR)/core

@@ -15,10 +15,7 @@ AdEnv      env[4];
 I2CHandle i2c;
 
 
-Switch left_top;
-Switch left_bottom;
-Switch right_top;
-Switch right_bottom;
+Switch buttons[4];
 
 const int DIO0 = 7;
 const int DIO1 = 8;
@@ -41,8 +38,13 @@ const int AI7 = 25;
 const int AO0 = 22;
 const int AO1 = 23;
 
+const int DECAY_KNOB = 0;
+const int VOLUME_KNOB = 1;
+const int FREQ_KNOB = 3;
+
 float freq;
-int iteration;
+float frequencies[4];
+int iteration = -1;
 int address;
 
 /*
@@ -119,29 +121,31 @@ void AudioCallback(AudioHandle::InterleavingInputBuffer  in,
         out[i] = 0;
     }
 
-    float osc_out, env_out, amp;
-    uint8_t data[1];
+    float osc_out, env_out;
+    float knobs[4];
 
-    left_top.Debounce();
-    right_top.Debounce();
-    left_bottom.Debounce();
-    right_bottom.Debounce();
+    if (iteration != -1) {iteration += 1;}
+    for (int k = 0; k < 4; k += 1){
+        buttons[k].Debounce();
+        knobs[k] = hardware.adc.GetFloat(k);
+    }
+    for (int k = 0; k < 4; k += 1){
+        
+        if(buttons[k].RisingEdge()){ 
+            env[k].Trigger();
+            hardware.PrintLine("%d:  %f", k, knobs[k]);
+            env[k].SetTime(ADENV_SEG_DECAY, 0.05 + 4.0 * knobs[DECAY_KNOB]);}
+            if (knobs[FREQ_KNOB] < 0.25) {
+                osc[k].SetFreq(frequencies[k] * 0.25);}
+            else if (knobs[FREQ_KNOB] < 0.65) {
+                osc[k].SetFreq(frequencies[k] * 0.5);}
+            else if (knobs[FREQ_KNOB] < 0.85) {
+                osc[k].SetFreq(frequencies[k] * 1.0);}
+            else {
+                osc[k].SetFreq(frequencies[k] * 2.0 );}
 
-    iteration = iteration + 1;
-    //If you push the button,...
-    if(left_top.RisingEdge()){ env[0].Trigger(); }
-    if(left_bottom.RisingEdge()){ env[1].Trigger(); }
-    if(right_top.RisingEdge()){ env[2].Trigger(); }
-    if(right_bottom.RisingEdge()){ env[3].Trigger(); }
-
-    //Convert floating point knob to midi (0-127)
-    //Then convert midi to freq. in Hz
-    //osc.SetFreq(mtof(hardware.adc.GetFloat(0) * 127));
-    osc[0].SetFreq(mtof(127));
-    osc[1].SetFreq(mtof(127 + 10));
-    osc[2].SetFreq(mtof(127 + 20));
-    osc[3].SetFreq(mtof(127 + 30));
-    
+        
+    }
 
     //Fill the block with samples
     for(size_t i = 0; i < size; i += 2)
@@ -150,8 +154,8 @@ void AudioCallback(AudioHandle::InterleavingInputBuffer  in,
         out[i + 1] = 0;
         for (int j = 0; j < 4; j+= 1) {
             env_out = env[j].Process();
-            amp = hardware.adc.GetFloat(j);
-            osc[j].SetAmp(env_out * amp);
+            osc[j].SetAmp(env_out * knobs[VOLUME_KNOB]);
+            //osc[j].SetAmp(env_out * 0.5);
             osc_out = osc[j].Process();
             out[i]     = osc_out + out[i];// * 100.0;
             out[i + 1] = osc_out + out[i+1];// * 100.0;
@@ -171,10 +175,11 @@ void config_adcs() {
 }
 void config_buttons() {
     // Set 1 kHz update rate for buttons, should be sufficient.
-    left_top.Init(hardware.GetPin(DIO4), 1000);
-    left_bottom.Init(hardware.GetPin(DIO5), 1000);
-    right_top.Init(hardware.GetPin(DIO6), 1000);
-    right_bottom.Init(hardware.GetPin(DIO7), 1000);
+    
+    buttons[0].Init(hardware.GetPin(DIO4), 1000);
+    buttons[1].Init(hardware.GetPin(DIO5), 1000);
+    buttons[2].Init(hardware.GetPin(DIO6), 1000);
+    buttons[3].Init(hardware.GetPin(DIO7), 1000);
 }
 int main(void)
 {
@@ -185,20 +190,25 @@ int main(void)
     hardware.Init();
     hardware.SetAudioBlockSize(4);
     freq = 0;
-    iteration = 0;
+    iteration = -1;
     address = 0;
     //How many samples we'll output per second
     float samplerate = hardware.AudioSampleRate();
     config_adcs();
     config_buttons();
     
+    
+    frequencies[0] = 1046.50;  //C
+    frequencies[1] = 1174.66;  //D
+    frequencies[2] = 1318.51;  //E
+    frequencies[3] = 1567.98;  //G
 
     //Set up oscillator
-    for (int i; i < 4; i += 1){
+    for (int i = 0; i < 4; i += 1){
         osc[i].Init(samplerate);
         osc[i].SetWaveform(osc[i].WAVE_SIN);
         osc[i].SetAmp(1.f);
-        osc[i].SetFreq(1000);
+        osc[i].SetFreq(frequencies[i]);
 
         //Set up volume envelope
         env[i].Init(samplerate);
@@ -212,7 +222,7 @@ int main(void)
     }
     // Debugging over USB UART
     hardware.StartLog(false);
-
+    /*
     // I2C
     I2CHandle::Config i2c_conf;    
     i2c_conf.periph = I2CHandle::Config::Peripheral::I2C_1;
@@ -222,7 +232,7 @@ int main(void)
     i2c_conf.pin_config.sda  = {DSY_GPIOB, 9};  // Daisy Pin 13
     // initialise the peripheral
     i2c.Init(i2c_conf);
-
+    */
     //Start the adc
     hardware.adc.Start();
 
