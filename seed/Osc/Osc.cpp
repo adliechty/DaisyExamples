@@ -15,6 +15,8 @@
 // daisy:: before all libdaisy functions
 using namespace daisy;
 using namespace daisysp;
+using namespace soundmath;
+
 
 //////////////////////////////////
 // FFT Items
@@ -77,6 +79,9 @@ inline void denoise(const S* in, S* out)
 
 	for (size_t i = 0; i < N / 2; i++)
 	{
+        out[i] = in[i];
+        out[i + offset] = in[i + offset];
+        /*
 		if ((in[i] * in[i] + in[i + offset] * in[i + offset]) < thresh * thresh * average)
 		{
 			// rescale the low-amplitude frequency bins by (1 - beta) ...
@@ -88,7 +93,7 @@ inline void denoise(const S* in, S* out)
 			// ... and the high-amplitude ones by beta
 			out[i] = beta * in[i];
 			out[i + offset] = beta * in[i + offset];
-		}
+		}*/
 	}
 }
 
@@ -102,7 +107,7 @@ AdEnv      env[4];
 I2CHandle i2c;
 
 // 5 second Audio Buffer
-const int audio_buffer_length = 48000 * 2;
+const int audio_buffer_length = 48000 * 5;
 static float DSY_SDRAM_BSS audio_buffers[4][audio_buffer_length];
 int playback_index[4] = {audio_buffer_length, audio_buffer_length, audio_buffer_length, audio_buffer_length};
 int record_index[4] = {audio_buffer_length, audio_buffer_length, audio_buffer_length, audio_buffer_length};
@@ -230,8 +235,6 @@ void NotesMode(AudioHandle::InterleavingOutputBuffer out,
     //Fill the block with samples
     for(size_t i = 0; i < size; i += 2)
     {
-        out[i] = 0;
-        out[i + 1] = 0;
         for (int j = 0; j < 4; j+= 1) {
             env_out = env[j].Process();
             osc[j].SetAmp(env_out * knobs[VOLUME_KNOB]);
@@ -255,8 +258,6 @@ void PlaybackMode(AudioHandle::InterleavingOutputBuffer out,
     //Fill the block with samples
     for(size_t i = 0; i < size; i += 2)
     {
-        out[i] = 0;
-        out[i + 1] = 0;
         for (int j = 0; j < 4; j+= 1) {
             if (playback_index[j] < audio_buffer_length) {
                 out[i]     = audio_buffers[j][playback_index[j]] + out[i];// * 100.0;
@@ -300,6 +301,22 @@ void RecordMode(AudioHandle::InterleavingInputBuffer in,
     }
 }
 
+void DSP( AudioHandle::InterleavingInputBuffer in,
+          AudioHandle::InterleavingOutputBuffer out,
+                  size_t                              size,
+                  float knobs[4]) {
+    for (size_t i = 0; i < size; i += 2)
+	{
+        stft->write(0);
+		//stft->write(in[i]); // put a new sample in the STFT
+        //stft->read();
+		//out[i] = stft->read(); // read the next sample from the STFT
+		//out[i + 1] = out[i];
+        //out[i] = 0;
+        //out[i+1] = 0;
+	}
+}
+
 void AudioCallback(AudioHandle::InterleavingInputBuffer  in,
                    AudioHandle::InterleavingOutputBuffer out,
                    size_t                                size)
@@ -326,6 +343,9 @@ void AudioCallback(AudioHandle::InterleavingInputBuffer  in,
     else {
         PlaybackMode(out, size, knobs);
     }
+
+    //Before sending audio out, feed it through some DSP
+    DSP(in, out, size, knobs);
     
     
 }
@@ -369,7 +389,7 @@ int main(void)
     // components before initialization.
     hardware.Configure();
     hardware.Init();
-    hardware.SetAudioBlockSize(4);
+    hardware.SetAudioBlockSize(bsize);
     freq = 0;
     iteration = -1;
     address = 0;
@@ -422,5 +442,9 @@ int main(void)
     hardware.StartAudio(AudioCallback);
 
     // Loop forever
-    for(;;) {}
+    while (true) {
+        System::DelayUs(16667); // 1/60 second
+    }
+    delete stft;
+	delete fft;
 }
