@@ -1,12 +1,99 @@
+//to program, type ctrl p, then enter "task build_and_program_dfu"
+#include <string.h>
 #include "daisy_seed.h"
 #include "daisysp.h"
 
-//to program, type ctrl p, then enter "task build_and_program_dfu"
+
+#include <cmath>
+#include <complex>
+#include "shy_fft.h"
+
+#include "fourier.h"
+#include "wave.h"
 
 // Use the daisy namespace to prevent having to type
 // daisy:: before all libdaisy functions
 using namespace daisy;
 using namespace daisysp;
+
+//////////////////////////////////
+// FFT Items
+//////////////////////////////////
+#define PI 3.1415926535897932384626433832795
+#define SR 48000
+typedef float S; // sample type
+
+// convenient lookup tables
+Wave<S> hann([] (S phase) -> S { return 0.5 * (1 - cos(2 * PI * phase)); });
+Wave<S> halfhann([] (S phase) -> S { return sin(PI * phase); });
+
+const size_t bsize = 256;
+
+bool controls_processed = false;
+
+// 4 overlapping windows of size 2^12 = 4096
+const size_t order = 12;
+const size_t N = (1 << order);
+const S sqrtN = sqrt(N);
+const size_t laps = 4;
+const size_t buffsize = 2 * laps * N;
+
+// buffers for STFT processing
+// audio --> in --(fft)--> middle --(process)--> out --(ifft)--> in -->
+// each of these is a few circular buffers stacked end-to-end.
+S in_pre_fft[buffsize]; // buffers for input and output (from / to user audio callback)
+S middle[buffsize]; // buffers for unprocessed frequency domain data
+S out_post_fft[buffsize]; // buffers for processed frequency domain data
+
+ShyFFT<S, N, RotationPhasor>* fft; // fft object
+Fourier<S, N>* stft; // stft object
+
+// initial parameters for denoise process
+// if testing without hardware control, try changing these values
+// beta = mix between high- and low-energy frequency bands
+// thresh = cutoff for designation of a bin as high- or low-energy
+S beta = 1, thresh = 15;
+
+// deal with analog & digital controls -- maybe update beta, thresh, ...
+static void ProcessControls()
+{
+
+}
+
+// shy_fft packs arrays as [real, real, real, ..., imag, imag, imag, ...]
+inline void denoise(const S* in, S* out)
+{
+	// convenient constant for grabbing imaginary parts
+	static const size_t offset = N / 2;
+
+	S average = 0;
+	for (size_t i = 0; i < N; i++)
+	{
+		out[i] = 0; 
+		average += in[i] * in[i];
+	}
+
+	average /= N;
+
+	for (size_t i = 0; i < N / 2; i++)
+	{
+		if ((in[i] * in[i] + in[i + offset] * in[i + offset]) < thresh * thresh * average)
+		{
+			// rescale the low-amplitude frequency bins by (1 - beta) ...
+			out[i] = (1 - beta) * in[i];
+			out[i + offset] = (1 - beta) * in[i + offset];
+		}
+		else
+		{
+			// ... and the high-amplitude ones by beta
+			out[i] = beta * in[i];
+			out[i + offset] = beta * in[i + offset];
+		}
+	}
+}
+
+/////////////////////////////////////////
+
 
 // Declare a DaisySeed object called hardware
 DaisySeed  hardware;
@@ -14,6 +101,11 @@ Oscillator osc[4];
 AdEnv      env[4];
 I2CHandle i2c;
 
+// 5 second Audio Buffer
+const int audio_buffer_length = 48000 * 2;
+static float DSY_SDRAM_BSS audio_buffers[4][audio_buffer_length];
+int playback_index[4] = {audio_buffer_length, audio_buffer_length, audio_buffer_length, audio_buffer_length};
+int record_index[4] = {audio_buffer_length, audio_buffer_length, audio_buffer_length, audio_buffer_length};
 
 Switch buttons[4];
 
@@ -41,6 +133,7 @@ const int AO1 = 23;
 const int DECAY_KNOB = 0;
 const int VOLUME_KNOB = 1;
 const int FREQ_KNOB = 3;
+const int MODE_KNOB = 2;
 
 float freq;
 float frequencies[4];
@@ -113,22 +206,11 @@ void 9DofSynth(AudioHandle::InterleavingInputBuffer  in,
     }
 }
 */
-void AudioCallback(AudioHandle::InterleavingInputBuffer  in,
-                   AudioHandle::InterleavingOutputBuffer out,
-                   size_t                                size)
+void NotesMode(AudioHandle::InterleavingOutputBuffer out,
+               size_t                                size,
+               float knobs[4])
 {
-    for(size_t i = 0; i < size; i += 1) {
-        out[i] = 0;
-    }
-
     float osc_out, env_out;
-    float knobs[4];
-
-    if (iteration != -1) {iteration += 1;}
-    for (int k = 0; k < 4; k += 1){
-        buttons[k].Debounce();
-        knobs[k] = hardware.adc.GetFloat(k);
-    }
     for (int k = 0; k < 4; k += 1){
         
         if(buttons[k].RisingEdge()){ 
@@ -143,8 +225,6 @@ void AudioCallback(AudioHandle::InterleavingInputBuffer  in,
                 osc[k].SetFreq(frequencies[k] * 1.0);}
             else {
                 osc[k].SetFreq(frequencies[k] * 2.0 );}
-
-        
     }
 
     //Fill the block with samples
@@ -161,6 +241,93 @@ void AudioCallback(AudioHandle::InterleavingInputBuffer  in,
             out[i + 1] = osc_out + out[i+1];// * 100.0;
         }
     }
+}
+void PlaybackMode(AudioHandle::InterleavingOutputBuffer out,
+                  size_t                                size,
+                  float knobs[4])
+{
+    for (int k = 0; k < 4; k += 1){
+        if(buttons[k].RisingEdge()){ 
+            playback_index[k] = 0;
+        }
+    }
+
+    //Fill the block with samples
+    for(size_t i = 0; i < size; i += 2)
+    {
+        out[i] = 0;
+        out[i + 1] = 0;
+        for (int j = 0; j < 4; j+= 1) {
+            if (playback_index[j] < audio_buffer_length) {
+                out[i]     = audio_buffers[j][playback_index[j]] + out[i];// * 100.0;
+                out[i + 1] = audio_buffers[j][playback_index[j]] + out[i+1];// * 100.0;
+                playback_index[j] = playback_index[j] + 1;
+            }
+        }
+        out[i] = out[i] * knobs[VOLUME_KNOB] * 10.0f;
+        out[i + 1] = out[i + 1] * knobs[VOLUME_KNOB] * 10.0f;
+    }
+}
+void RecordMode(AudioHandle::InterleavingInputBuffer in,
+                  size_t                              size,
+                  float knobs[4])
+{
+    for (int k = 0; k < 4; k += 1){
+        if(buttons[k].RisingEdge()){ 
+            record_index[k] = 0;
+        }
+    }
+
+    //Fill the block with samples
+    for(size_t i = 0; i < size; i += 2)
+    {
+        for (int j = 0; j < 4; j+= 1) {
+            if (record_index[j] < audio_buffer_length) {
+                // sum left and right channel
+                //if (buttons[j].Pressed()) {
+                    audio_buffers[j][record_index[j]] = in[i];// + in[i + 1];// * 100.0;
+                    record_index[j] = record_index[j] + 1;
+                /*} else {
+                    // If no longer pressed zero out the rest of the buffer
+                    while (record_index[j] < audio_buffer_length){
+                        audio_buffers[j][record_index[j]] = 0;
+                        record_index[j] += 1;
+                    }
+                }*/
+                
+            }
+        }
+    }
+}
+
+void AudioCallback(AudioHandle::InterleavingInputBuffer  in,
+                   AudioHandle::InterleavingOutputBuffer out,
+                   size_t                                size)
+{
+    for(size_t i = 0; i < size; i += 1) {
+        out[i] = 0;
+    }
+
+    
+    float knobs[4];
+    
+
+    if (iteration != -1) {iteration += 1;}
+    for (int k = 0; k < 4; k += 1){
+        buttons[k].Debounce();
+        knobs[k] = hardware.adc.GetFloat(k);
+    }
+    if (knobs[MODE_KNOB] < 0.25) {
+        NotesMode(out, size, knobs);
+    }
+    else if (knobs[MODE_KNOB] < 0.75) {
+        RecordMode(in, size, knobs);
+    }
+    else {
+        PlaybackMode(out, size, knobs);
+    }
+    
+    
 }
 
 void config_adcs() {
@@ -181,6 +348,20 @@ void config_buttons() {
     buttons[2].Init(hardware.GetPin(DIO6), 1000);
     buttons[3].Init(hardware.GetPin(DIO7), 1000);
 }
+void zero_buffers() {
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < audio_buffer_length; j ++) {
+            audio_buffers[i][j] = 0;
+        }
+    }
+}
+void init_fft() {
+    // initialize FFT and STFT objects
+	fft = new ShyFFT<S, N, RotationPhasor>();
+	fft->Init();
+    // first parameter to Forier specifies the processor to manipulate the frequency domain data
+	stft = new Fourier<S, N>(denoise, fft, &hann, laps, in_pre_fft, middle, out_post_fft);
+}
 int main(void)
 {
     // Configure and Initialize the Daisy Seed
@@ -196,6 +377,7 @@ int main(void)
     float samplerate = hardware.AudioSampleRate();
     config_adcs();
     config_buttons();
+    zero_buffers();
     
     
     frequencies[0] = 1046.50;  //C
